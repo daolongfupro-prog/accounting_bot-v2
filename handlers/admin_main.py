@@ -1,49 +1,43 @@
+import io
+import openpyxl
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
+from keyboards.admin_kb import get_main_admin_kb
 from config import SUPERADMINS
-from keyboards.admin_kb import get_main_admin_kb, get_massage_admin_kb
+from database.requests import get_all_data_for_export
 
-# Создаем роутер для админской части
 router = Router()
 
-# Простой фильтр: проверяем, есть ли ID пользователя в списке админов
-# Позже мы заменим это на проверку из базы данных
-def is_admin(telegram_id: int) -> bool:
-    return telegram_id in SUPERADMINS
-
 @router.message(Command("admin"))
-async def cmd_admin_panel(message: Message):
-    if not is_admin(message.from_user.id):
-        return # Если не админ, бот просто игнорирует команду
+async def admin_panel(message: Message):
+    if message.from_user.id not in SUPERADMINS: return 
+    await message.answer("🌟 Панель управления", reply_markup=get_main_admin_kb())
 
-    await message.answer(
-        "👑 <b>Добро пожаловать в Панель Управления!</b>\n\n"
-        "Здесь вы можете управлять записями на массаж и курсами обучения.\n"
-        "Выберите нужный раздел ниже:",
-        reply_markup=get_main_admin_kb(),
-        parse_mode="HTML"
-    )
-
-# Обработка нажатия на кнопку "Управление Массажем"
-@router.callback_query(F.data == "admin_massage")
-async def process_massage_menu(callback: CallbackQuery):
-    # Изменяем текущее сообщение (чтобы не спамить новыми)
-    await callback.message.edit_text(
-        "💆‍♀️ <b>Раздел: Массаж</b>\n\n"
-        "Выберите действие:",
-        reply_markup=get_massage_admin_kb(),
-        parse_mode="HTML"
-    )
-    await callback.answer() # Закрываем уведомление о нажатии (часики на кнопке)
-
-# Обработка нажатия "Назад"
 @router.callback_query(F.data == "admin_main")
-async def process_back_to_main(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "👑 <b>Панель Управления</b>\n\n"
-        "Выберите нужный раздел ниже:",
-        reply_markup=get_main_admin_kb(),
-        parse_mode="HTML"
+async def back_to_main(callback: CallbackQuery):
+    await message.answer("🌟 Панель управления", reply_markup=get_main_admin_kb())
+
+@router.callback_query(F.data == "admin_backup")
+async def export_excel(callback: CallbackQuery):
+    users = await get_all_data_for_export()
+    
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Studio Backup"
+    ws.append(["ID", "Имя", "Тип", "Всего", "Ушло", "Остаток", "Статус"])
+
+    for u in users:
+        for p in u.packages:
+            ws.append([u.id, u.full_name, p.package_type, p.total_sessions, 
+                       p.used_sessions, p.total_sessions - p.used_sessions, p.status])
+
+    file_stream = io.BytesIO()
+    wb.save(file_stream)
+    file_stream.seek(0)
+    
+    await callback.message.answer_document(
+        BufferedInputFile(file_stream.read(), filename="backup.xlsx"),
+        caption="📁 Полный бэкап базы клиентов"
     )
     await callback.answer()
