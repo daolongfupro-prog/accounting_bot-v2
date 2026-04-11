@@ -7,15 +7,15 @@ from aiogram.enums import ParseMode
 from config import BOT_TOKEN
 
 # Импортируем наши роутеры из папки handlers
-from handlers import admin_main, admin_massage, user
+from handlers import admin_main, admin_massage, admin_edu, user
 
-# Настраиваем базовое логирование, чтобы видеть ошибки в консоли Railway
+# Настраиваем базовое логирование, чтобы видеть процессы в консоли
 logging.basicConfig(level=logging.INFO)
 
 async def main():
     # Проверяем, есть ли токен
     if not BOT_TOKEN:
-        logging.error("Не найден BOT_TOKEN! Проверьте файл .env или переменные Railway.")
+        logging.error("Не найден BOT_TOKEN! Проверьте файл .env или настройки Railway.")
         return
 
     # Инициализируем бота. Указываем, что по умолчанию используем HTML-разметку
@@ -31,6 +31,7 @@ async def main():
     # Бот будет проверять сообщения по этим файлам сверху вниз.
     dp.include_router(admin_main.router)     # Главное меню админа
     dp.include_router(admin_massage.router)  # Логика массажа
+    dp.include_router(admin_edu.router)      # Логика обучения (Новый модуль!)
     dp.include_router(user.router)           # Клиентская часть
 
     # Запускаем бота
