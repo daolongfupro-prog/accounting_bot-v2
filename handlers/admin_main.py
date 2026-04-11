@@ -52,7 +52,7 @@ async def export_excel(callback: CallbackQuery):
     
     await callback.message.answer_document(
         BufferedInputFile(file_stream.read(), filename="studio_backup.xlsx"),
-        caption="📁 <b>Актуальный бэкап базы данных</b>\nСгенерирован из системы Railway.",
+        caption="📁 <b>Актуальный бэкап базы данных</b>",
         parse_mode="HTML"
     )
     await callback.answer()
