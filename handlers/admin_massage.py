@@ -6,30 +6,27 @@ from aiogram.utils.deep_linking import create_start_link
 
 router = Router()
 
-# 1. Создаем "состояния" (шаги), которые бот будет запоминать
+# --- FSM (Машина состояний) для добавления клиента ---
 class AddClientForm(StatesGroup):
     waiting_for_name = State()
     waiting_for_package = State()
 
-# 2. Ловим нажатие на кнопку "➕ Добавить клиента" из админки
+# --- ДОБАВЛЕНИЕ КЛИЕНТА ---
+
 @router.callback_query(F.data == "msg_add_client")
 async def start_adding_client(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer(
+    await callback.message.edit_text(
         "📝 <b>Добавление нового VIP-клиента</b>\n\n"
         "Введите Имя и Фамилию клиента:",
         parse_mode="HTML"
     )
-    # Включаем состояние "Жду имя"
     await state.set_state(AddClientForm.waiting_for_name)
     await callback.answer()
 
-# 3. Ловим текст (Имя), пока бот находится в состоянии waiting_for_name
 @router.message(AddClientForm.waiting_for_name)
 async def process_client_name(message: Message, state: FSMContext):
-    # Сохраняем имя в оперативную память бота
     await state.update_data(client_name=message.text)
     
-    # Клавиатура для выбора пакета
     packages_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="5 сеансов", callback_data="pkg_5")],
         [InlineKeyboardButton(text="10 сеансов", callback_data="pkg_10")],
@@ -42,29 +39,18 @@ async def process_client_name(message: Message, state: FSMContext):
         reply_markup=packages_kb,
         parse_mode="HTML"
     )
-    # Переключаем на следующий шаг
     await state.set_state(AddClientForm.waiting_for_package)
 
-# 4. Ловим выбор пакета (кнопки, начинающиеся на "pkg_")
 @router.callback_query(AddClientForm.waiting_for_package, F.data.startswith("pkg_"))
 async def process_client_package(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    # Достаем количество сеансов из callback_data (например, из "pkg_15" достаем 15)
     sessions_count = int(callback.data.split("_")[1])
-    
-    # Достаем сохраненное имя из памяти
     data = await state.get_data()
     client_name = data['client_name']
     
-    # ==========================================
-    # ЗДЕСЬ БУДЕТ ЗАПИСЬ В БАЗУ ДАННЫХ (PostgreSQL)
-    # 1. Создаем пользователя (client_name)
-    # 2. Создаем ему пакет (sessions_count)
-    # 3. Получаем его уникальный ID из базы (допустим, ID = 105)
-    db_user_id = 105 # Пока имитируем ID из базы
-    # ==========================================
+    # TODO: Запись в БД (PostgreSQL). Получение db_user_id
+    db_user_id = 105 # Заглушка
     
-    # Генерируем ту самую умную ссылку (Deep Link) для этого ID
-    # encode=True сделает ссылку зашифрованной, чтобы ID не читался явно
+    # Генерация зашифрованной ссылки
     link = await create_start_link(bot, str(db_user_id), encode=True)
     
     await callback.message.edit_text(
@@ -75,7 +61,34 @@ async def process_client_package(callback: CallbackQuery, state: FSMContext, bot
         f"<i>Отправьте эту ссылку клиенту. Когда он перейдет по ней, бот автоматически его узнает.</i>",
         parse_mode="HTML"
     )
-    
-    # Очищаем состояния, процесс завершен
     await state.clear()
     await callback.answer()
+
+# --- СПИСАНИЕ СЕАНСОВ ---
+
+@router.callback_query(F.data == "msg_deduct")
+async def show_clients_for_deduction(callback: CallbackQuery):
+    # TODO: Получение списка активных клиентов из БД
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Иван Иванов (остаток: 5)", callback_data="deduct_user_105")],
+        [InlineKeyboardButton(text="👤 Анна Смирнова (остаток: 2)", callback_data="deduct_user_106")],
+        [InlineKeyboardButton(text="🔙 Назад в меню массажа", callback_data="admin_massage")]
+    ])
+    
+    await callback.message.edit_text("Выберите клиента для списания сеанса:", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("deduct_user_"))
+async def confirm_deduction(callback: CallbackQuery):
+    user_id = callback.data.split("_")[2]
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="1 сеанс", callback_data=f"confirm_dec_{user_id}_1"),
+            InlineKeyboardButton(text="2 сеанса", callback_data=f"confirm_dec_{user_id}_2")
+        ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="msg_deduct")]
+    ])
+    
+    await callback.message.edit_text(f"Сколько сеансов списать?", reply_markup=kb)
+
+# TODO: Добавить обработчик для confirm_dec_... (само списание в БД)
