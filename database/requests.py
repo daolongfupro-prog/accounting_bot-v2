@@ -29,6 +29,13 @@ async def get_user_by_tg_id(telegram_id: int) -> User:
         )
         return result.scalar_one_or_none()
 
+async def update_user_language(telegram_id: int, lang_code: str):
+    async with async_session() as session:
+        await session.execute(
+            update(User).where(User.telegram_id == telegram_id).values(language=lang_code)
+        )
+        await session.commit()
+
 async def get_active_users_by_type(package_type: str):
     async with async_session() as session:
         result = await session.execute(
@@ -47,7 +54,6 @@ async def deduct_sessions(user_id: int, package_type: str, amount_to_deduct: int
 
         package.used_sessions += amount_to_deduct
         
-        # Запись в историю для отчета
         history_entry = History(user_id=user_id, action_type=package_type, amount=amount_to_deduct)
         session.add(history_entry)
         
@@ -59,7 +65,5 @@ async def deduct_sessions(user_id: int, package_type: str, amount_to_deduct: int
 
 async def get_all_data_for_export():
     async with async_session() as session:
-        result = await session.execute(
-            select(User).options(selectinload(User.packages))
-        )
+        result = await session.execute(select(User).options(selectinload(User.packages)))
         return result.scalars().unique().all()
