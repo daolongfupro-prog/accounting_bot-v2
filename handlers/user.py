@@ -5,7 +5,6 @@ from aiogram.utils.deep_linking import decode_payload
 
 router = Router()
 
-# 1. Клавиатура выбора языка
 def get_language_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru")],
@@ -13,24 +12,15 @@ def get_language_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en")]
     ])
 
-# 2. Ловим старт по "Умной ссылке"
+# --- АВТОРИЗАЦИЯ И ВЫБОР ЯЗЫКА ---
+
 @router.message(CommandStart(deep_link=True))
 async def cmd_start_deep_link(message: Message, command: CommandObject):
-    # command.args содержит наш зашифрованный ID из ссылки
     args = command.args
-    
     try:
-        # Расшифровываем ID клиента (например, получим "105")
         db_user_id = int(decode_payload(args))
-        
-        # ==========================================
-        # ЗДЕСЬ БУДЕТ РАБОТА С БАЗОЙ ДАННЫХ:
-        # 1. Ищем карточку клиента по ID = db_user_id
-        # 2. Обновляем в ней telegram_id = message.from_user.id
-        #    (Теперь бот навсегда запомнил, чей это аккаунт)
-        # 3. Достаем Имя из базы
-        client_name = "Иван" # Временная заглушка
-        # ==========================================
+        # TODO: Привязать message.from_user.id к db_user_id в базе данных
+        client_name = "Иван" # Заглушка
         
         await message.answer(
             f"👋 Добро пожаловать, <b>{client_name}</b>!\n\n"
@@ -41,39 +31,47 @@ async def cmd_start_deep_link(message: Message, command: CommandObject):
             parse_mode="HTML"
         )
     except Exception:
-        # Если ссылка битая или ID не расшифровался
         await message.answer("❌ Ошибка: неверная или устаревшая ссылка.")
 
-# 3. Ловим обычный старт (без ссылки)
 @router.message(CommandStart())
 async def cmd_start_normal(message: Message):
-    # Если случайный человек нашел бота в поиске Телеграма
-    # Здесь мы будем проверять, есть ли его telegram_id в нашей БД
-    
-    # Заглушка для неавторизованных:
+    # TODO: Проверка, есть ли юзер в базе. Если есть - показать главное меню.
     await message.answer(
         "🔒 Здравствуйте! Этот бот работает только по персональным приглашениям.\n"
         "Пожалуйста, обратитесь к администратору для получения доступа."
     )
 
-# 4. Обработка выбора языка
 @router.callback_query(F.data.startswith("lang_"))
 async def process_language_selection(callback: CallbackQuery):
-    # Достаем код языка из кнопки (ru, uz, en)
     lang_code = callback.data.split("_")[1] 
+    # TODO: Сохранить язык в БД
     
-    # ==========================================
-    # ЗДЕСЬ БУДЕТ РАБОТА С БАЗОЙ ДАННЫХ:
-    # Сохраняем выбранный язык (lang_code) в профиль пользователя
-    # ==========================================
-    
-    # Временная логика ответов (позже это будет работать через файлы локализации)
     if lang_code == "ru":
-        text = "✅ Язык успешно установлен!\n\n<i>Здесь будет отображаться ваш остаток сеансов и дата оплаты...</i>"
+        text = "✅ Язык успешно установлен!\n\nНажмите /profile, чтобы посмотреть остаток сеансов."
     elif lang_code == "uz":
-        text = "✅ Til muvaffaqiyatli o'rnatildi!\n\n<i>Bu yerda seanslaringiz qoldig'i va to'lov sanasi ko'rsatiladi...</i>"
+        text = "✅ Til muvaffaqiyatli o'rnatildi!\n\nSeanslar qoldig'ini ko'rish uchun /profile tugmasini bosing."
     else:
-        text = "✅ Language successfully set!\n\n<i>Your remaining sessions and payment date will be displayed here...</i>"
+        text = "✅ Language successfully set!\n\nClick /profile to see your remaining sessions."
         
     await callback.message.edit_text(text, parse_mode="HTML")
     await callback.answer()
+
+# --- ЛИЧНЫЙ КАБИНЕТ КЛИЕНТА ---
+
+@router.message(F.text.in_(["📊 Мой остаток", "/profile"]))
+async def show_user_profile(message: Message):
+    # TODO: Достать данные клиента из БД
+    user_name = "Иван"
+    remaining = 4
+    total = 10
+    last_visit = "10.04.2024"
+    
+    profile_text = (
+        f"<b>👤 Личный кабинет: {user_name}</b>\n\n"
+        f"🎟 Пакет: <b>{total} сеансов</b>\n"
+        f"✅ Осталось: <b>{remaining} сеансов</b>\n"
+        f"📅 Последний визит: <code>{last_visit}</code>\n\n"
+        f"<i>При остатке 2 сеанса я пришлю вам уведомление!</i>"
+    )
+    
+    await message.answer(profile_text, parse_mode="HTML")
