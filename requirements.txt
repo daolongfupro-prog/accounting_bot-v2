@@ -7,3 +7,4 @@ SQLAlchemy==2.0.36
 asyncpg
 python-dotenv
 greenlet
+pydantic-settings>=2.0.0
