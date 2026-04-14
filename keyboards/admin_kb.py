@@ -16,7 +16,8 @@ def get_main_admin_kb() -> InlineKeyboardMarkup:
 def get_massage_admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить клиента", callback_data="msg_add_client")],
+            # ИСПРАВЛЕНО: было msg_add_client, стало massage_add_client
+            [InlineKeyboardButton(text="➕ Добавить клиента", callback_data="massage_add_client")],
             [InlineKeyboardButton(text="📉 Списать сеанс", callback_data="msg_deduct")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_main")],
         ]
