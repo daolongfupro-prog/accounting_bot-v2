@@ -28,6 +28,9 @@ router = Router()
 
 PACKAGE_OPTIONS = [4, 8, 12]
 
+# Устанавливаем фильтр IsAdmin на весь роутер, чтобы не дублировать его
+router.message.filter(IsAdmin())
+router.callback_query.filter(IsAdmin())
 
 class AddStudentForm(StatesGroup):
     waiting_for_name = State()
@@ -55,8 +58,11 @@ def _back_to_edu_kb() -> InlineKeyboardMarkup:
     ])
 
 
-@router.callback_query(IsAdmin(), F.data == "admin_edu")
-async def edu_menu(callback: CallbackQuery) -> None:
+# --- ГЛАВНОЕ МЕНЮ ОБУЧЕНИЯ (С ОЧИСТКОЙ СОСТОЯНИЯ!) ---
+@router.callback_query(F.data == "admin_edu")
+async def edu_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    # ОЧЕНЬ ВАЖНО: Если админ нажал "Назад" или "Отмена", мы сбрасываем FSM!
+    await state.clear() 
     await callback.answer()
     await callback.message.edit_text(
         "🎓 <b>Управление обучением</b>",
@@ -64,7 +70,8 @@ async def edu_menu(callback: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(IsAdmin(), F.data == "edu_add_student")
+# --- ШАГ 1: Старт добавления ученика ---
+@router.callback_query(F.data == "edu_add_student")
 async def add_student_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await callback.message.edit_text(
@@ -74,6 +81,43 @@ async def add_student_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddStudentForm.waiting_for_name)
 
 
-@router.message(IsAdmin(), AddStudentForm.waiting_for_name)
+# --- ШАГ 2: Получаем ФИО (текст) ---
+@router.message(AddStudentForm.waiting_for_name, F.text)
 async def add_student_name(message: Message, state: FSMContext) -> None:
-    n
+    # Сохраняем имя ученика в хранилище состояний
+    await state.update_data(student_name=message.text)
+    
+    await message.answer(
+        f"ФИО '{message.text}' принято.\nВыберите пакет занятий:",
+        reply_markup=_package_kb(),
+    )
+    # Переводим в ожидание нажатия кнопки пакета
+    await state.set_state(AddStudentForm.waiting_for_package)
+
+
+# --- ШАГ 3: Получаем пакет занятий (Инлайн-кнопка) ---
+@router.callback_query(AddStudentForm.waiting_for_package, F.data.startswith("edu_pkg_"))
+async def add_student_package(callback: CallbackQuery, state: FSMContext) -> None:
+    # Извлекаем количество занятий из колбека (например, из "edu_pkg_8" берем "8")
+    sessions_count = int(callback.data.split("_")[2])
+    
+    # Достаем сохраненное ФИО
+    user_data = await state.get_data()
+    student_name = user_data.get("student_name")
+    
+    # ==========================================
+    # ТУТ ТВОЯ ЛОГИКА БАЗЫ ДАННЫХ
+    # Например:
+    # await create_client_with_package(name=student_name, type=PackageType.EDU, sessions=sessions_count...)
+    # ==========================================
+    
+    await callback.message.edit_text(
+        f"✅ Ученик <b>{student_name}</b> успешно добавлен!\n"
+        f"Оплачено занятий: {sessions_count}",
+        parse_mode="HTML",
+        reply_markup=_back_to_edu_kb() # Кнопка для возврата в меню
+    )
+    
+    # Очищаем состояние после успешного добавления
+    await state.clear()
+    await callback.answer()
