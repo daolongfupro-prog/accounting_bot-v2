@@ -42,3 +42,4 @@ class AddClientForm(StatesGroup):
 def _package_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inl
+    )
