@@ -1,69 +1,140 @@
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
-from database.engine import async_session
-from database.models import User, Package, History
 
-async def create_client_with_package(full_name: str, package_type: str, total_sessions: int) -> int:
-    async with async_session() as session:
-        new_user = User(full_name=full_name, role="client" if package_type == "massage" else "student")
-        session.add(new_user)
-        await session.flush() 
-        new_package = Package(user_id=new_user.id, package_type=package_type, total_sessions=total_sessions)
-        session.add(new_package)
-        await session.commit()
-        return new_user.id
+from database.engine import get_session
+from database.models import (
+    ActionType,
+    History,
+    Package,
+    PackageStatus,
+    PackageType,
+    User,
+    UserRole,
+)
 
-async def link_telegram_id(db_user_id: int, telegram_id: int) -> User:
-    async with async_session() as session:
+logger = logging.getLogger(__name__)
+
+
+async def create_client_with_package(
+    full_name: str,
+    package_type: PackageType,
+    total_sessions: int,
+) -> int:
+    role = UserRole.CLIENT if package_type == PackageType.MASSAGE else UserRole.CLIENT
+    async with get_session() as session:
+        user = User(full_name=full_name, role=role)
+        session.add(user)
+        await session.flush()
+
+        package = Package(
+            user_id=user.id,
+            package_type=package_type,
+            total_sessions=total_sessions,
+        )
+        session.add(package)
+        logger.info("Создан пользователь id=%s с пакетом %s", user.id, package_type)
+        return user.id
+
+
+async def link_telegram_id(db_user_id: int, telegram_id: int) -> Optional[User]:
+    async with get_session() as session:
         user = await session.get(User, db_user_id)
-        if user:
-            user.telegram_id = telegram_id
-            await session.commit()
-            return user
-        return None
+        if not user:
+            logger.warning("Пользователь id=%s не найден", db_user_id)
+            return None
+        user.telegram_id = telegram_id
+        logger.info("Привязан telegram_id=%s к user_id=%s", telegram_id, db_user_id)
+        return user
 
-async def get_user_by_tg_id(telegram_id: int) -> User:
-    async with async_session() as session:
+
+async def get_user_by_tg_id(telegram_id: int) -> Optional[User]:
+    async with get_session() as session:
         result = await session.execute(
-            select(User).options(selectinload(User.packages)).where(User.telegram_id == telegram_id)
+            select(User)
+            .options(
+                selectinload(User.packages),
+                selectinload(User.history),
+            )
+            .where(User.telegram_id == telegram_id)
         )
         return result.scalar_one_or_none()
 
-async def update_user_language(telegram_id: int, lang_code: str):
-    async with async_session() as session:
+
+async def update_user_language(telegram_id: int, lang_code: str) -> None:
+    async with get_session() as session:
         await session.execute(
-            update(User).where(User.telegram_id == telegram_id).values(language=lang_code)
+            update(User)
+            .where(User.telegram_id == telegram_id)
+            .values(language=lang_code)
         )
-        await session.commit()
+        logger.info("Язык пользователя tg=%s → %s", telegram_id, lang_code)
 
-async def get_active_users_by_type(package_type: str):
-    async with async_session() as session:
+
+async def get_active_users_by_type(package_type: PackageType) -> list[User]:
+    async with get_session() as session:
         result = await session.execute(
-            select(User).join(Package).options(selectinload(User.packages))
-            .where(Package.package_type == package_type, Package.status == 'active')
+            select(User)
+            .join(Package)
+            .options(selectinload(User.packages))
+            .where(
+                Package.package_type == package_type,
+                Package.status == PackageStatus.ACTIVE,
+            )
         )
-        return result.scalars().unique().all()
+        return list(result.scalars().unique().all())
 
-async def deduct_sessions(user_id: int, package_type: str, amount_to_deduct: int) -> dict:
-    async with async_session() as session:
+
+async def deduct_sessions(
+    user_id: int,
+    package_type: PackageType,
+    amount: int,
+) -> dict:
+    async with get_session() as session:
         result = await session.execute(
-            select(Package).where(Package.user_id == user_id, Package.package_type == package_type, Package.status == 'active')
+            select(Package).where(
+                Package.user_id == user_id,
+                Package.package_type == package_type,
+                Package.status == PackageStatus.ACTIVE,
+            )
         )
         package = result.scalar_one_or_none()
-        if not package: return {"status": "error", "message": "Пакет не найден"}
 
-        package.used_sessions += amount_to_deduct
-        
-        history_entry = History(user_id=user_id, action_type=package_type, amount=amount_to_deduct)
-        session.add(history_entry)
-        
-        if package.used_sessions >= package.total_sessions:
-            package.status = "completed"
-        
-        await session.commit()
-        return {"status": "success", "remaining": max(0, package.total_sessions - package.used_sessions), "completed": package.status == "completed"}
+        if not package:
+            logger.warning("Активный пакет не найден user_id=%s type=%s", user_id, package_type)
+            return {"status": "error", "message": "Пакет не найден"}
 
-async def get_all_data_for_export():
-    async with async_session() as session:
-        result = await session.execute(select(User).options(selectinload(User.packages)))
-        return result.scalars().unique().all()
+        package.used_sessions += amount
+
+        is_completed = package.used_sessions >= package.total_sessions
+        if is_completed:
+            package.status = PackageStatus.COMPLETED
+            action = ActionType.PACKAGE_COMPLETED
+        else:
+            action = ActionType.SESSION_USED
+
+        session.add(History(user_id=user_id, action_type=action, amount=amount))
+
+        remaining = max(0, package.total_sessions - package.used_sessions)
+        logger.info("user_id=%s списано %s сессий, остаток=%s", user_id, amount, remaining)
+
+        return {
+            "status": "success",
+            "remaining": remaining,
+            "completed": is_completed,
+        }
+
+
+async def get_all_data_for_export() -> list[User]:
+    async with get_session() as session:
+        result = await session.execute(
+            select(User).options(
+                selectinload(User.packages),
+                selectinload(User.history),
+            )
+        )
+        return list(result.scalars().unique().all())
