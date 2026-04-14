@@ -1,24 +1,42 @@
-import os
-from dotenv import load_dotenv
+from __future__ import annotations
 
-load_dotenv()
+from pydantic import Field, PostgresDsn, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Твои ID
-SUPERADMINS = [2103579364, 146156901]
-ADMIN_IDS = SUPERADMINS 
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
 
-# Умная обработка ссылки для базы данных
-if DATABASE_URL:
-    # Сначала проверяем старый формат (postgres://)
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-    # Потом проверяем формат Railway (postgresql://)
-    elif DATABASE_URL.startswith("postgresql://"):
-        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+    # Бот
+    BOT_TOKEN: str = Field(..., min_length=10)
 
-# Если ссылки нет совсем (например, локальный запуск), оставим пустую строку
-else:
-    DATABASE_URL = ""
+    # База данных
+    DATABASE_URL: str = Field(..., min_length=10)
+
+    # Режим отладки
+    DEBUG: bool = False
+
+    # Права доступа
+    SUPERADMIN_IDS: list[int] = Field(default=[2103579364, 146156901])
+    ADMIN_IDS: list[int] = Field(default=[])
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def fix_database_url(cls, v: str) -> str:
+        if v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql+asyncpg://", 1)
+        if v.startswith("postgresql://"):
+            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
+
+    @property
+    def all_admin_ids(self) -> list[int]:
+        """Все администраторы включая супер-админов"""
+        return list(set(self.SUPERADMIN_IDS + self.ADMIN_IDS))
+
+
+settings = Settings()
