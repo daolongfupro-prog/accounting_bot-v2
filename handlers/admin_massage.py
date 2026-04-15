@@ -173,4 +173,16 @@ async def process_msg_deduction(callback: CallbackQuery) -> None:
         res = await deduct_sessions(user_id, PackageType.MASSAGE, 1)
         if res["status"] == "success":
             status = "🏁 Пакет завершён!" if res["completed"] else f"✅ Списано! Остаток: {res['remaining']}"
-            await c
+            await callback.answer(status, show_alert=True)
+            await show_massage_clients(callback)
+        else:
+            await callback.message.edit_text(
+                f"❌ {res['message']}",
+                reply_markup=_back_to_massage_kb(),
+            )
+    except Exception:
+        logger.exception("Ошибка списания user_id=%s", user_id)
+        await callback.message.answer(
+            "❌ Ошибка при списании. Смотри логи.",
+            reply_markup=_back_to_massage_kb(),
+        )
