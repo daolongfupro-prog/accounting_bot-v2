@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Filter
@@ -17,11 +18,18 @@ from aiogram.utils.deep_linking import create_start_link
 from config import settings
 from database.models import PackageStatus, PackageType
 from database.requests import (
+    archive_user,
     create_client_with_package,
     deduct_sessions,
     get_active_users_by_type,
 )
-from keyboards.admin_kb import get_massage_admin_kb
+from keyboards.admin_kb import (
+    get_confirm_delete_kb,
+    get_deduction_time_kb,
+    get_massage_admin_kb,
+    get_user_manage_kb,
+    get_users_list_kb,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -38,11 +46,16 @@ router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
 
 
+# --- FSM (Состояния) ---
 class AddClientForm(StatesGroup):
     waiting_for_name = State()
     waiting_for_package = State()
 
+class CustomTimeForm(StatesGroup):
+    waiting_for_time = State()
 
+
+# --- ВСПОМОГАТЕЛЬНЫЕ КЛАВИАТУРЫ ---
 def _package_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -64,6 +77,9 @@ def _back_to_massage_kb() -> InlineKeyboardMarkup:
     ])
 
 
+# ==========================================
+# 1. ГЛАВНОЕ МЕНЮ МАССАЖА
+# ==========================================
 @router.callback_query(F.data == "admin_massage")
 async def massage_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -74,7 +90,10 @@ async def massage_menu(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.callback_query(F.data == "msg_add_client")
+# ==========================================
+# 2. ДОБАВЛЕНИЕ КЛИЕНТА
+# ==========================================
+@router.callback_query(F.data == "massage_add_client")
 async def add_client_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await callback.message.edit_text(
@@ -130,8 +149,11 @@ async def add_client_package(
         await state.clear()
 
 
-@router.callback_query(F.data == "msg_deduct")
-async def show_massage_clients(callback: CallbackQuery) -> None:
+# ==========================================
+# 3. УПРАВЛЕНИЕ КЛИЕНТАМИ (СПИСОК И КАРТОЧКА)
+# ==========================================
+@router.callback_query(F.data == "massage_manage_users")
+async def show_massage_users(callback: CallbackQuery) -> None:
     await callback.answer()
     users = await get_active_users_by_type(PackageType.MASSAGE)
 
@@ -142,39 +164,132 @@ async def show_massage_clients(callback: CallbackQuery) -> None:
         )
         return
 
-    kb = []
-    for u in users:
-        pkg = next(
-            (p for p in u.packages
-             if p.package_type == PackageType.MASSAGE
-             and p.status == PackageStatus.ACTIVE),
-            None,
-        )
-        if not pkg:
-            continue
-        kb.append([InlineKeyboardButton(
-            text=f"👤 {u.full_name} (остаток: {pkg.remaining_sessions})",
-            callback_data=f"msg_dec_{u.id}",
-        )])
-
-    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_massage")])
     await callback.message.edit_text(
-        "👇 Выберите клиента для списания:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+        "👥 <b>Выберите клиента:</b>",
+        reply_markup=get_users_list_kb(users, "msg"),
     )
 
 
-@router.callback_query(F.data.startswith("msg_dec_"))
-async def process_msg_deduction(callback: CallbackQuery) -> None:
+@router.callback_query(F.data.startswith("msg_user_"))
+async def show_user_card(callback: CallbackQuery) -> None:
     await callback.answer()
     user_id = int(callback.data.split("_")[2])
+    
+    users = await get_active_users_by_type(PackageType.MASSAGE)
+    user = next((u for u in users if u.id == user_id), None)
 
+    if not user:
+        await callback.message.edit_text("❌ Клиент не найден или перемещен в архив.", reply_markup=_back_to_massage_kb())
+        return
+
+    pkg = next((p for p in user.packages if p.status == PackageStatus.ACTIVE), None)
+    rem = pkg.remaining_sessions if pkg else 0
+    tot = pkg.total_sessions if pkg else 0
+
+    text = (
+        f"👤 <b>Карточка клиента:</b> {user.full_name}\n"
+        f"Услуга: Массаж\n"
+        f"Остаток сеансов: <b>{rem} из {tot}</b>"
+    )
+
+    await callback.message.edit_text(text, reply_markup=get_user_manage_kb(user_id, "msg"))
+
+
+# ==========================================
+# 4. УДАЛЕНИЕ КЛИЕНТА (АРХИВАЦИЯ)
+# ==========================================
+@router.callback_query(F.data.startswith("msg_delete_"))
+async def confirm_delete_user(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[2])
+    await callback.message.edit_text(
+        "⚠️ <b>Вы уверены?</b>\nКлиент будет перемещен в архив. Он исчезнет из списков, но останется в Excel выгрузке.",
+        reply_markup=get_confirm_delete_kb(user_id, "msg")
+    )
+
+
+@router.callback_query(F.data.startswith("msg_confirm_del_"))
+async def execute_delete_user(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[3])
+    success = await archive_user(user_id)
+    
+    if success:
+        await callback.answer("✅ Клиент перемещен в архив", show_alert=True)
+    else:
+        await callback.answer("❌ Ошибка удаления", show_alert=True)
+        
+    await show_massage_users(callback) # Возвращаем к списку
+
+
+# ==========================================
+# 5. СПИСАНИЕ СЕАНСА (ВЫБОР ВРЕМЕНИ)
+# ==========================================
+@router.callback_query(F.data.startswith("msg_deduct_"))
+async def ask_deduction_time(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[2])
+    await callback.message.edit_text(
+        "🕒 <b>Укажите время визита:</b>\n\n"
+        "Вы можете списать сеанс прямо сейчас, либо указать дату и время вручную (например, если забыли списать вчера).",
+        reply_markup=get_deduction_time_kb(user_id, "msg")
+    )
+
+
+@router.callback_query(F.data.startswith("msg_time_now_"))
+async def process_deduct_now(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[3])
+    # Передаем None, БД сама подставит func.now()
+    await _execute_deduction(callback, user_id, None) 
+
+
+@router.callback_query(F.data.startswith("msg_time_custom_"))
+async def process_deduct_custom_start(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = int(callback.data.split("_")[3])
+    await state.update_data(deduct_user_id=user_id)
+    
+    await callback.message.edit_text(
+        "✏️ Отправьте дату и время визита в формате:\n"
+        "<b>ДД.ММ.ГГГГ ЧЧ:ММ</b>\n\n"
+        "<i>Пример: 15.08.2023 14:30</i>"
+    )
+    await state.set_state(CustomTimeForm.waiting_for_time)
+
+
+@router.message(CustomTimeForm.waiting_for_time, F.text)
+async def process_deduct_custom_finish(message: Message, state: FSMContext) -> None:
+    user_data = await state.get_data()
+    user_id = user_data.get("deduct_user_id")
+    
     try:
-        res = await deduct_sessions(user_id, PackageType.MASSAGE, 1)
+        # Пытаемся распарсить дату, которую ввел админ
+        visit_time = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
+    except ValueError:
+        await message.answer("❌ Неверный формат! Попробуйте снова.\nПример: 15.08.2023 14:30")
+        return
+
+    await state.clear()
+    
+    # Чтобы использовать нашу общую функцию логики ответа
+    # Создадим "фейковый" callback_query объект для вызова
+    # Либо просто вызовем нужный функционал напрямую:
+    try:
+        res = await deduct_sessions(user_id, PackageType.MASSAGE, 1, visit_time)
+        if res["status"] == "success":
+            status_text = "🏁 Пакет завершён!" if res["completed"] else f"✅ Списано задним числом! Остаток: {res['remaining']}"
+            await message.answer(status_text, reply_markup=_back_to_massage_kb())
+        else:
+            await message.answer(f"❌ {res['message']}", reply_markup=_back_to_massage_kb())
+    except Exception:
+        logger.exception("Ошибка кастомного списания user_id=%s", user_id)
+        await message.answer("❌ Ошибка при списании.", reply_markup=_back_to_massage_kb())
+
+
+# --- Внутренняя функция для обработки результата списания ---
+async def _execute_deduction(callback: CallbackQuery, user_id: int, visit_time: datetime | None) -> None:
+    try:
+        res = await deduct_sessions(user_id, PackageType.MASSAGE, 1, visit_time)
         if res["status"] == "success":
             status = "🏁 Пакет завершён!" if res["completed"] else f"✅ Списано! Остаток: {res['remaining']}"
             await callback.answer(status, show_alert=True)
-            await show_massage_clients(callback)
+            await show_massage_users(callback) # Возвращаем к списку
         else:
             await callback.message.edit_text(
                 f"❌ {res['message']}",
