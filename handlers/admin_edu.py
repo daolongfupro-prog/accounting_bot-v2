@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from aiogram import Bot, F, Router
+from aiogram.filters import Filter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -16,27 +18,45 @@ from aiogram.utils.deep_linking import create_start_link
 from config import settings
 from database.models import PackageStatus, PackageType
 from database.requests import (
+    archive_user,
     create_client_with_package,
     deduct_sessions,
     get_active_users_by_type,
 )
-from handlers.admin_massage import IsAdmin
-from keyboards.admin_kb import get_edu_admin_kb
+from keyboards.admin_kb import (
+    get_confirm_delete_kb,
+    get_deduction_time_kb,
+    get_edu_admin_kb,
+    get_user_manage_kb,
+    get_users_list_kb,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
 
-PACKAGE_OPTIONS = [4, 8, 12]
+# Согласно нашему ТЗ: 1 месяц (12), 3 месяца (37), 6 месяцев (75)
+PACKAGE_OPTIONS = [12, 37, 75]
 
-# Устанавливаем фильтр IsAdmin на весь роутер, чтобы не дублировать его
+
+class IsAdmin(Filter):
+    async def __call__(self, event: Message | CallbackQuery) -> bool:
+        return event.from_user.id in settings.SUPERADMIN_IDS
+
+
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
 
+
+# --- FSM (Состояния) ---
 class AddStudentForm(StatesGroup):
     waiting_for_name = State()
     waiting_for_package = State()
 
+class EduCustomTimeForm(StatesGroup):
+    waiting_for_time = State()
 
+
+# --- ВСПОМОГАТЕЛЬНЫЕ КЛАВИАТУРЫ ---
 def _package_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -58,11 +78,12 @@ def _back_to_edu_kb() -> InlineKeyboardMarkup:
     ])
 
 
-# --- ГЛАВНОЕ МЕНЮ ОБУЧЕНИЯ (С ОЧИСТКОЙ СОСТОЯНИЯ!) ---
+# ==========================================
+# 1. ГЛАВНОЕ МЕНЮ ОБУЧЕНИЯ
+# ==========================================
 @router.callback_query(F.data == "admin_edu")
 async def edu_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    # ОЧЕНЬ ВАЖНО: Если админ нажал "Назад" или "Отмена", мы сбрасываем FSM!
-    await state.clear() 
+    await state.clear()
     await callback.answer()
     await callback.message.edit_text(
         "🎓 <b>Управление обучением</b>",
@@ -70,54 +91,209 @@ async def edu_menu(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-# --- ШАГ 1: Старт добавления ученика ---
+# ==========================================
+# 2. ДОБАВЛЕНИЕ УЧЕНИКА
+# ==========================================
 @router.callback_query(F.data == "edu_add_student")
 async def add_student_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await callback.message.edit_text(
-        "📝 Введите ФИО ученика:",
+        "📝 Введите ФИО нового ученика:",
         reply_markup=_back_to_edu_kb(),
     )
     await state.set_state(AddStudentForm.waiting_for_name)
 
 
-# --- ШАГ 2: Получаем ФИО (текст) ---
 @router.message(AddStudentForm.waiting_for_name, F.text)
 async def add_student_name(message: Message, state: FSMContext) -> None:
-    # Сохраняем имя ученика в хранилище состояний
-    await state.update_data(student_name=message.text)
-    
+    await state.update_data(student_name=message.text.strip())
     await message.answer(
-        f"ФИО '{message.text}' принято.\nВыберите пакет занятий:",
+        f"ФИО <b>{message.text}</b> принято.\nВыберите программу обучения:",
         reply_markup=_package_kb(),
     )
-    # Переводим в ожидание нажатия кнопки пакета
     await state.set_state(AddStudentForm.waiting_for_package)
 
 
-# --- ШАГ 3: Получаем пакет занятий (Инлайн-кнопка) ---
 @router.callback_query(AddStudentForm.waiting_for_package, F.data.startswith("edu_pkg_"))
-async def add_student_package(callback: CallbackQuery, state: FSMContext) -> None:
-    # Извлекаем количество занятий из колбека (например, из "edu_pkg_8" берем "8")
+async def add_student_package(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    await callback.answer()
     sessions_count = int(callback.data.split("_")[2])
-    
-    # Достаем сохраненное ФИО
     user_data = await state.get_data()
     student_name = user_data.get("student_name")
+
+    try:
+        student_id = await create_client_with_package(
+            full_name=student_name,
+            package_type=PackageType.EDUCATION,
+            total_sessions=sessions_count,
+        )
+        invite_link = await create_start_link(bot, str(student_id), encode=True)
+        await callback.message.edit_text(
+            f"✅ Ученик <b>{student_name}</b> успешно добавлен!\n"
+            f"Оплачено занятий: {sessions_count}\n\n"
+            f"🔗 <b>Перешлите эту ссылку ученику для входа:</b>\n"
+            f"<code>{invite_link}</code>",
+            reply_markup=_back_to_edu_kb(),
+        )
+        logger.info("Добавлен ученик '%s' id=%s занятий=%s", student_name, student_id, sessions_count)
+    except Exception:
+        logger.exception("Ошибка при добавлении ученика '%s'", student_name)
+        await callback.message.answer(
+            "❌ Ошибка при добавлении ученика. Смотри логи.",
+            reply_markup=_back_to_edu_kb(),
+        )
+    finally:
+        await state.clear()
+
+
+# ==========================================
+# 3. УПРАВЛЕНИЕ УЧЕНИКАМИ (СПИСОК И КАРТОЧКА)
+# ==========================================
+@router.callback_query(F.data == "edu_manage_users")
+async def show_edu_users(callback: CallbackQuery) -> None:
+    await callback.answer()
+    users = await get_active_users_by_type(PackageType.EDUCATION)
+
+    if not users:
+        await callback.message.edit_text(
+            "😔 Нет активных учеников",
+            reply_markup=_back_to_edu_kb(),
+        )
+        return
+
+    await callback.message.edit_text(
+        "👥 <b>Выберите ученика:</b>",
+        reply_markup=get_users_list_kb(users, "edu"),
+    )
+
+
+@router.callback_query(F.data.startswith("edu_user_"))
+async def show_user_card(callback: CallbackQuery) -> None:
+    await callback.answer()
+    user_id = int(callback.data.split("_")[2])
     
-    # ==========================================
-    # ТУТ ТВОЯ ЛОГИКА БАЗЫ ДАННЫХ
-    # Например:
-    # await create_client_with_package(name=student_name, type=PackageType.EDU, sessions=sessions_count...)
-    # ==========================================
+    users = await get_active_users_by_type(PackageType.EDUCATION)
+    user = next((u for u in users if u.id == user_id), None)
+
+    if not user:
+        await callback.message.edit_text("❌ Ученик не найден или перемещен в архив.", reply_markup=_back_to_edu_kb())
+        return
+
+    pkg = next((p for p in user.packages if p.status == PackageStatus.ACTIVE), None)
+    rem = pkg.remaining_sessions if pkg else 0
+    tot = pkg.total_sessions if pkg else 0
+
+    text = (
+        f"🎓 <b>Карточка ученика:</b> {user.full_name}\n"
+        f"Услуга: Обучение\n"
+        f"Остаток занятий: <b>{rem} из {tot}</b>"
+    )
+
+    await callback.message.edit_text(text, reply_markup=get_user_manage_kb(user_id, "edu"))
+
+
+# ==========================================
+# 4. УДАЛЕНИЕ УЧЕНИКА (АРХИВАЦИЯ)
+# ==========================================
+@router.callback_query(F.data.startswith("edu_delete_"))
+async def confirm_delete_user(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[2])
+    await callback.message.edit_text(
+        "⚠️ <b>Вы уверены?</b>\nУченик будет перемещен в архив. Он исчезнет из списков, но останется в Excel выгрузке.",
+        reply_markup=get_confirm_delete_kb(user_id, "edu")
+    )
+
+
+@router.callback_query(F.data.startswith("edu_confirm_del_"))
+async def execute_delete_user(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[3])
+    success = await archive_user(user_id)
+    
+    if success:
+        await callback.answer("✅ Ученик перемещен в архив", show_alert=True)
+    else:
+        await callback.answer("❌ Ошибка удаления", show_alert=True)
+        
+    await show_edu_users(callback) # Возвращаем к списку
+
+
+# ==========================================
+# 5. СПИСАНИЕ ЗАНЯТИЯ (ВЫБОР ВРЕМЕНИ)
+# ==========================================
+@router.callback_query(F.data.startswith("edu_deduct_"))
+async def ask_deduction_time(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[2])
+    await callback.message.edit_text(
+        "🕒 <b>Укажите время занятия:</b>\n\n"
+        "Вы можете списать занятие прямо сейчас, либо указать дату и время вручную (например, если забыли списать вчера).",
+        reply_markup=get_deduction_time_kb(user_id, "edu")
+    )
+
+
+@router.callback_query(F.data.startswith("edu_time_now_"))
+async def process_deduct_now(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[3])
+    await _execute_deduction(callback, user_id, None) 
+
+
+@router.callback_query(F.data.startswith("edu_time_custom_"))
+async def process_deduct_custom_start(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = int(callback.data.split("_")[3])
+    await state.update_data(deduct_user_id=user_id)
     
     await callback.message.edit_text(
-        f"✅ Ученик <b>{student_name}</b> успешно добавлен!\n"
-        f"Оплачено занятий: {sessions_count}",
-        parse_mode="HTML",
-        reply_markup=_back_to_edu_kb() # Кнопка для возврата в меню
+        "✏️ Отправьте дату и время занятия в формате:\n"
+        "<b>ДД.ММ.ГГГГ ЧЧ:ММ</b>\n\n"
+        "<i>Пример: 15.08.2023 14:30</i>"
     )
+    await state.set_state(EduCustomTimeForm.waiting_for_time)
+
+
+@router.message(EduCustomTimeForm.waiting_for_time, F.text)
+async def process_deduct_custom_finish(message: Message, state: FSMContext) -> None:
+    user_data = await state.get_data()
+    user_id = user_data.get("deduct_user_id")
     
-    # Очищаем состояние после успешного добавления
+    try:
+        visit_time = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
+    except ValueError:
+        await message.answer("❌ Неверный формат! Попробуйте снова.\nПример: 15.08.2023 14:30")
+        return
+
     await state.clear()
-    await callback.answer()
+    
+    try:
+        res = await deduct_sessions(user_id, PackageType.EDUCATION, 1, visit_time)
+        if res["status"] == "success":
+            status_text = "🏁 Курс завершён!" if res["completed"] else f"✅ Списано задним числом! Остаток: {res['remaining']}"
+            await message.answer(status_text, reply_markup=_back_to_edu_kb())
+        else:
+            await message.answer(f"❌ {res['message']}", reply_markup=_back_to_edu_kb())
+    except Exception:
+        logger.exception("Ошибка кастомного списания user_id=%s", user_id)
+        await message.answer("❌ Ошибка при списании.", reply_markup=_back_to_edu_kb())
+
+
+# --- Внутренняя функция для обработки результата списания ---
+async def _execute_deduction(callback: CallbackQuery, user_id: int, visit_time: datetime | None) -> None:
+    try:
+        res = await deduct_sessions(user_id, PackageType.EDUCATION, 1, visit_time)
+        if res["status"] == "success":
+            status = "🏁 Курс завершён!" if res["completed"] else f"✅ Списано! Остаток: {res['remaining']}"
+            await callback.answer(status, show_alert=True)
+            await show_edu_users(callback) # Возвращаем к списку
+        else:
+            await callback.message.edit_text(
+                f"❌ {res['message']}",
+                reply_markup=_back_to_edu_kb(),
+            )
+    except Exception:
+        logger.exception("Ошибка списания user_id=%s", user_id)
+        await callback.message.answer(
+            "❌ Ошибка при списании. Смотри логи.",
+            reply_markup=_back_to_edu_kb(),
+        )
