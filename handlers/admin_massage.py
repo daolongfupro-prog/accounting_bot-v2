@@ -28,12 +28,12 @@ router = Router()
 
 PACKAGE_OPTIONS = [5, 10, 15]
 
-# Фильтр проверки на админа
+
 class IsAdmin(Filter):
     async def __call__(self, event: Message | CallbackQuery) -> bool:
         return event.from_user.id in settings.SUPERADMIN_IDS
 
-# Применяем фильтр админа ко всему роутеру, чтобы защитить все функции
+
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
 
@@ -64,8 +64,6 @@ def _back_to_massage_kb() -> InlineKeyboardMarkup:
     ])
 
 
-# --- ГЛАВНОЕ МЕНЮ МАССАЖА ---
-# ВАЖНО: Убедись, что кнопка "Массаж" в твоей клавиатуре выдает callback_data="admin_massage"
 @router.callback_query(F.data == "admin_massage")
 async def massage_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -76,9 +74,7 @@ async def massage_menu(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-# --- ШАГ 1: Старт добавления клиента ---
-# ВАЖНО: Убедись, что кнопка "Добавить клиента" выдает callback_data="massage_add_client"
-@router.callback_query(F.data == "massage_add_client")
+@router.callback_query(F.data == "msg_add_client")
 async def add_client_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await callback.message.edit_text(
@@ -88,50 +84,93 @@ async def add_client_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddClientForm.waiting_for_name)
 
 
-# --- ШАГ 2: Получаем имя (текстовое сообщение) ---
 @router.message(AddClientForm.waiting_for_name, F.text)
 async def add_client_name(message: Message, state: FSMContext) -> None:
-    await state.update_data(client_name=message.text)
+    await state.update_data(client_name=message.text.strip())
     await message.answer(
-        f"Имя '{message.text}' принято.\nВыберите количество сеансов:",
+        f"Имя <b>{message.text}</b> принято.\nВыберите количество сеансов:",
         reply_markup=_package_kb(),
     )
     await state.set_state(AddClientForm.waiting_for_package)
 
 
-# --- ШАГ 3: Выбор пакета, сохранение в БД и выдача ссылки ---
 @router.callback_query(AddClientForm.waiting_for_package, F.data.startswith("msg_pkg_"))
-async def add_client_package(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+async def add_client_package(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    await callback.answer()
     sessions_count = int(callback.data.split("_")[2])
     user_data = await state.get_data()
     client_name = user_data.get("client_name")
-    
-    # 1. Сохраняем в базу данных. 
-    # Предполагается, что твоя функция возвращает созданного клиента (чтобы мы могли взять его ID)
-    client_db_result = await create_client_with_package(
-        name=client_name,
-        # Если в модели требуется передать тип пакета:
-        # type=PackageType.MASSAGE, 
-        sessions=sessions_count
-    )
-    
-    # Пытаемся получить ID (если функция возвращает объект алхимии, берем .id. Если просто число - берем его)
-    client_id = client_db_result.id if hasattr(client_db_result, 'id') else client_db_result
-    
-    # 2. Генерируем уникальную ссылку-приглашение для бота
-    # Бот запакует payload (например, "msg_123") в ссылку. 
-    invite_payload = f"msg_{client_id}"
-    invite_link = await create_start_link(bot, invite_payload, encode=True)
-    
-    # 3. Выдаем ссылку администратору
-    await callback.message.edit_text(
-        f"✅ Клиент <b>{client_name}</b> успешно добавлен!\n"
-        f"Оплачено сеансов: {sessions_count}\n\n"
-        f"🔗 <b>Перешлите эту ссылку клиенту для входа:</b>\n"
-        f"<code>{invite_link}</code>",
-        parse_mode="HTML",
-        reply_markup=_back_to_massage_kb()
-    )
-    
-    await state.clear()
+
+    try:
+        client_id = await create_client_with_package(
+            full_name=client_name,
+            package_type=PackageType.MASSAGE,
+            total_sessions=sessions_count,
+        )
+        invite_link = await create_start_link(bot, str(client_id), encode=True)
+        await callback.message.edit_text(
+            f"✅ Клиент <b>{client_name}</b> успешно добавлен!\n"
+            f"Оплачено сеансов: {sessions_count}\n\n"
+            f"🔗 <b>Перешлите эту ссылку клиенту для входа:</b>\n"
+            f"<code>{invite_link}</code>",
+            reply_markup=_back_to_massage_kb(),
+        )
+        logger.info("Добавлен клиент массажа '%s' id=%s сеансов=%s", client_name, client_id, sessions_count)
+    except Exception:
+        logger.exception("Ошибка при добавлении клиента '%s'", client_name)
+        await callback.message.answer(
+            "❌ Ошибка при добавлении клиента. Смотри логи.",
+            reply_markup=_back_to_massage_kb(),
+        )
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data == "msg_deduct")
+async def show_massage_clients(callback: CallbackQuery) -> None:
     await callback.answer()
+    users = await get_active_users_by_type(PackageType.MASSAGE)
+
+    if not users:
+        await callback.message.edit_text(
+            "😔 Нет активных клиентов массажа",
+            reply_markup=_back_to_massage_kb(),
+        )
+        return
+
+    kb = []
+    for u in users:
+        pkg = next(
+            (p for p in u.packages
+             if p.package_type == PackageType.MASSAGE
+             and p.status == PackageStatus.ACTIVE),
+            None,
+        )
+        if not pkg:
+            continue
+        kb.append([InlineKeyboardButton(
+            text=f"👤 {u.full_name} (остаток: {pkg.remaining_sessions})",
+            callback_data=f"msg_dec_{u.id}",
+        )])
+
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_massage")])
+    await callback.message.edit_text(
+        "👇 Выберите клиента для списания:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+    )
+
+
+@router.callback_query(F.data.startswith("msg_dec_"))
+async def process_msg_deduction(callback: CallbackQuery) -> None:
+    await callback.answer()
+    user_id = int(callback.data.split("_")[2])
+
+    try:
+        res = await deduct_sessions(user_id, PackageType.MASSAGE, 1)
+        if res["status"] == "success":
+            status = "🏁 Пакет завершён!" if res["completed"] else f"✅ Списано! Остаток: {res['remaining']}"
+            await c
