@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import select, update
@@ -8,13 +9,12 @@ from sqlalchemy.orm import selectinload
 
 from database.engine import get_session
 from database.models import (
-    ActionType,
-    History,
     Package,
     PackageStatus,
     PackageType,
     User,
     UserRole,
+    Visit,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ async def create_client_with_package(
     package_type: PackageType,
     total_sessions: int,
 ) -> int:
-    role = UserRole.CLIENT if package_type == PackageType.MASSAGE else UserRole.CLIENT
+    role = UserRole.CLIENT
     async with get_session() as session:
         user = User(full_name=full_name, role=role)
         session.add(user)
@@ -44,9 +44,11 @@ async def create_client_with_package(
 async def link_telegram_id(db_user_id: int, telegram_id: int) -> Optional[User]:
     async with get_session() as session:
         user = await session.get(User, db_user_id)
-        if not user:
-            logger.warning("Пользователь id=%s не найден", db_user_id)
+        # Проверяем, существует ли юзер и не в архиве ли он
+        if not user or user.is_archived:
+            logger.warning("Пользователь id=%s не найден или удален", db_user_id)
             return None
+            
         user.telegram_id = telegram_id
         logger.info("Привязан telegram_id=%s к user_id=%s", telegram_id, db_user_id)
         return user
@@ -58,9 +60,12 @@ async def get_user_by_tg_id(telegram_id: int) -> Optional[User]:
             select(User)
             .options(
                 selectinload(User.packages),
-                selectinload(User.history),
+                selectinload(User.visits),
             )
-            .where(User.telegram_id == telegram_id)
+            .where(
+                User.telegram_id == telegram_id,
+                User.is_archived == False  # Не пускаем удаленных
+            )
         )
         return result.scalar_one_or_none()
 
@@ -82,6 +87,7 @@ async def get_active_users_by_type(package_type: PackageType) -> list[User]:
             .join(Package)
             .options(selectinload(User.packages))
             .where(
+                User.is_archived == False, # Исключаем удаленных
                 Package.package_type == package_type,
                 Package.status == PackageStatus.ACTIVE,
             )
@@ -89,10 +95,23 @@ async def get_active_users_by_type(package_type: PackageType) -> list[User]:
         return list(result.scalars().unique().all())
 
 
+# НОВАЯ ФУНКЦИЯ: Мягкое удаление клиента (перевод в архив)
+async def archive_user(user_id: int) -> bool:
+    async with get_session() as session:
+        user = await session.get(User, user_id)
+        if not user or user.is_archived:
+            return False
+            
+        user.is_archived = True
+        logger.info("Пользователь id=%s переведен в архив", user_id)
+        return True
+
+
 async def deduct_sessions(
     user_id: int,
     package_type: PackageType,
-    amount: int,
+    amount: int = 1,
+    visit_time: Optional[datetime] = None, # Теперь можно передать точную дату!
 ) -> dict:
     async with get_session() as session:
         result = await session.execute(
@@ -109,32 +128,44 @@ async def deduct_sessions(
             return {"status": "error", "message": "Пакет не найден"}
 
         package.used_sessions += amount
-
         is_completed = package.used_sessions >= package.total_sessions
+        
         if is_completed:
             package.status = PackageStatus.COMPLETED
-            action = ActionType.PACKAGE_COMPLETED
-        else:
-            action = ActionType.SESSION_USED
 
-        session.add(History(user_id=user_id, action_type=action, amount=amount))
+        # Высчитываем остаток для фиксации в чеке визита
+        balance_after = max(0, package.total_sessions - package.used_sessions)
 
-        remaining = max(0, package.total_sessions - package.used_sessions)
-        logger.info("user_id=%s списано %s сессий, остаток=%s", user_id, amount, remaining)
+        # Создаем точную запись визита
+        visit = Visit(
+            user_id=user_id,
+            package_id=package.id,
+            amount=-amount,
+            balance_after=balance_after
+        )
+        
+        # Если админ указал дату вручную — используем её. Иначе БД поставит текущую.
+        if visit_time:
+            visit.visit_time = visit_time
+
+        session.add(visit)
+
+        logger.info("user_id=%s списано %s сессий, остаток=%s", user_id, amount, balance_after)
 
         return {
             "status": "success",
-            "remaining": remaining,
+            "remaining": balance_after,
             "completed": is_completed,
         }
 
 
 async def get_all_data_for_export() -> list[User]:
+    # Для Excel выгружаем ВСЕХ (включая архивных), чтобы статистика была полной
     async with get_session() as session:
         result = await session.execute(
             select(User).options(
                 selectinload(User.packages),
-                selectinload(User.history),
+                selectinload(User.visits),
             )
         )
         return list(result.scalars().unique().all())
