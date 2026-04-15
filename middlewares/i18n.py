@@ -4,7 +4,7 @@ import logging
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import TelegramObject
 
 from database.models import User
 
@@ -81,7 +81,7 @@ class I18nMiddleware(BaseMiddleware):
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
-        event: Message | CallbackQuery,
+        event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
         db_user: User | None = data.get("db_user")
