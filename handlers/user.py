@@ -15,18 +15,17 @@ from aiogram.types import (
 from aiogram.utils.deep_linking import decode_payload
 
 from config import settings
-from database.models import User
+from database.models import User, PackageType, PackageStatus # Добавили импорт Enums
 from database.requests import link_telegram_id, update_user_language
-from middlewares.i18n import TEXTS, get_texts
+from middlewares.i18n import TEXTS
 
 logger = logging.getLogger(__name__)
 router = Router()
 
-
 # --- Клавиатуры ---
 
 def get_user_main_kb(lang: str = "ru") -> ReplyKeyboardMarkup:
-    t = TEXTS[lang]
+    t = TEXTS.get(lang, TEXTS["ru"])
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=t["balance"])],
@@ -34,7 +33,6 @@ def get_user_main_kb(lang: str = "ru") -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
-
 
 def get_language_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -48,41 +46,45 @@ def get_language_kb() -> InlineKeyboardMarkup:
 
 # --- Хендлеры ---
 
-@router.message(CommandStart(deep_link=True))
-async def cmd_start_deep_link(
+@router.message(CommandStart())
+async def cmd_start_unified(
     message: Message,
     command: CommandObject,
-    texts: dict,
-) -> None:
-    try:
-        db_user_id = int(decode_payload(command.args))
-        user = await link_telegram_id(db_user_id, message.from_user.id)
-        if user:
-            await message.answer(
-                texts["greeting"].format(name=user.full_name),
-                reply_markup=get_language_kb(),
-            )
-        else:
-            await message.answer(texts["invalid_link"])
-    except Exception:
-        logger.exception("Ошибка deep link tg_id=%s", message.from_user.id)
-        await message.answer(texts["invalid_link"])
-
-
-@router.message(CommandStart())
-async def cmd_start_normal(
-    message: Message,
     db_user: User | None,
     texts: dict,
 ) -> None:
+    # 1. ПРОВЕРЯЕМ ДИПЛИНК (Пришел ли человек по ссылке)
+    if command.args:
+        try:
+            db_user_id = int(decode_payload(command.args))
+            user = await link_telegram_id(db_user_id, message.from_user.id)
+            if user:
+                # Если язык еще не выбран, используем русский по умолчанию для приветствия
+                lang = user.language if user.language else "ru"
+                t = TEXTS.get(lang, TEXTS["ru"])
+                await message.answer(
+                    t["greeting"].format(name=user.full_name),
+                    reply_markup=get_language_kb(),
+                    parse_mode="HTML"
+                )
+            else:
+                await message.answer(texts["invalid_link"])
+            return
+        except Exception:
+            logger.exception("Ошибка deep link tg_id=%s", message.from_user.id)
+            await message.answer(texts["invalid_link"])
+            return
+
+    # 2. ОБЫЧНЫЙ СТАРТ (Без ссылки)
     if message.from_user.id in settings.SUPERADMIN_IDS:
         await message.answer("⚙️ Режим администратора: /admin", reply_markup=get_user_main_kb("ru"))
         return
 
     if db_user:
         lang = db_user.language if db_user.language in TEXTS else "ru"
+        t = TEXTS.get(lang, TEXTS["ru"])
         await message.answer(
-            texts["welcome_back"].format(name=db_user.full_name),
+            t["welcome_back"].format(name=db_user.full_name),
             reply_markup=get_user_main_kb(lang),
         )
     else:
@@ -120,12 +122,14 @@ async def show_profile(
     lines = [t["profile_head"], ""]
 
     for p in db_user.packages:
-        name = t["massage"] if p.package_type.value == "massage" else t["edu"]
+        # ИСПОЛЬЗУЕМ СТРОГИЕ ENUMS
+        name = t["massage"] if p.package_type == PackageType.MASSAGE else t["edu"]
         rem = p.total_sessions - p.used_sessions
-        status = t["active"] if p.status.value == "active" else t["completed"]
+        status = t["active"] if p.status == PackageStatus.ACTIVE else t["completed"]
         lines.append(f"{name}\n{t['rem']}: <b>{rem}</b> {t['of']} {p.total_sessions}\n{status}\n")
 
-    await message.answer("\n".join(lines))
+    # ИСПРАВЛЕН БАГ: Добавили parse_mode="HTML"
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @router.message(F.text.in_({t["change_lang"] for t in TEXTS.values()}))
