@@ -77,9 +77,6 @@ def _back_to_massage_kb() -> InlineKeyboardMarkup:
     ])
 
 
-# ==========================================
-# 1. ГЛАВНОЕ МЕНЮ МАССАЖА
-# ==========================================
 @router.callback_query(F.data == "admin_massage")
 async def massage_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -90,9 +87,6 @@ async def massage_menu(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-# ==========================================
-# 2. ДОБАВЛЕНИЕ КЛИЕНТА
-# ==========================================
 @router.callback_query(F.data == "massage_add_client")
 async def add_client_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -121,4 +115,184 @@ async def add_client_package(
 ) -> None:
     await callback.answer()
     sessions_count = int(callback.data.split("_")[2])
-    user_
+    user_data = await state.get_data()
+    client_name = user_data.get("client_name")
+
+    try:
+        client_id = await create_client_with_package(
+            full_name=client_name,
+            package_type=PackageType.MASSAGE,
+            total_sessions=sessions_count,
+        )
+        invite_link = await create_start_link(bot, str(client_id), encode=True)
+        await callback.message.edit_text(
+            f"✅ Клиент <b>{client_name}</b> успешно добавлен!\n"
+            f"Оплачено сеансов: {sessions_count}\n\n"
+            f"🔗 <b>Перешлите эту ссылку клиенту для входа:</b>\n"
+            f"<code>{invite_link}</code>",
+            reply_markup=_back_to_massage_kb(),
+        )
+    except Exception:
+        logger.exception("Ошибка при добавлении клиента '%s'", client_name)
+        await callback.message.answer(
+            "❌ Ошибка при добавлении клиента. Смотри логи.",
+            reply_markup=_back_to_massage_kb(),
+        )
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data == "massage_manage_users")
+async def show_massage_users(callback: CallbackQuery) -> None:
+    await callback.answer()
+    users = await get_active_users_by_type(PackageType.MASSAGE)
+
+    if not users:
+        await callback.message.edit_text(
+            "😔 Нет активных клиентов массажа",
+            reply_markup=_back_to_massage_kb(),
+        )
+        return
+
+    await callback.message.edit_text(
+        "👥 <b>Выберите клиента:</b>",
+        reply_markup=get_users_list_kb(users, "msg"),
+    )
+
+
+@router.callback_query(F.data.startswith("msg_user_"))
+async def show_user_card(callback: CallbackQuery) -> None:
+    await callback.answer()
+    user_id = int(callback.data.split("_")[2])
+    
+    users = await get_active_users_by_type(PackageType.MASSAGE)
+    user = next((u for u in users if u.id == user_id), None)
+
+    if not user:
+        await callback.message.edit_text("❌ Клиент не найден или перемещен в архив.", reply_markup=_back_to_massage_kb())
+        return
+
+    pkg = next((p for p in user.packages if p.status == PackageStatus.ACTIVE), None)
+    
+    if not pkg:
+        await callback.message.edit_text("У клиента нет активного пакета.", reply_markup=get_user_manage_kb(user_id, "msg"))
+        return
+
+    rem = pkg.total_sessions - pkg.used_sessions
+    tot = pkg.total_sessions
+    buy_date = pkg.created_at.strftime("%d.%m.%Y %H:%M") if hasattr(pkg, 'created_at') and pkg.created_at else "Нет данных"
+
+    package_visits = [v for v in user.visits if v.package_id == pkg.id] if user.visits else []
+    
+    history_text = ""
+    if not package_visits:
+        history_text = "<i>Списаний пока не было.</i>"
+    else:
+        for i, v in enumerate(package_visits, 1):
+            v_date = v.visit_time.strftime("%d.%m.%Y %H:%M") if v.visit_time else "Нет даты"
+            history_text += f"{i}. <b>{v_date}</b> (Остаток: {v.balance_after})\n"
+
+    text = (
+        f"👤 <b>Карточка:</b> {user.full_name}\n"
+        f"Услуга: Массаж\n"
+        f"Дата оплаты: <b>{buy_date}</b>\n"
+        f"Остаток: <b>{rem} из {tot}</b>\n\n"
+        f"📉 <b>История списаний:</b>\n"
+        f"{history_text}"
+    )
+
+    await callback.message.edit_text(text, reply_markup=get_user_manage_kb(user_id, "msg"))
+
+
+@router.callback_query(F.data.startswith("msg_delete_"))
+async def confirm_delete_user(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[2])
+    await callback.message.edit_text(
+        "⚠️ <b>Вы уверены?</b>\nКлиент будет перемещен в архив.",
+        reply_markup=get_confirm_delete_kb(user_id, "msg")
+    )
+
+
+@router.callback_query(F.data.startswith("msg_confirm_del_"))
+async def execute_delete_user(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[3])
+    success = await archive_user(user_id)
+    if success:
+        await callback.answer("✅ Клиент перемещен в архив", show_alert=True)
+    else:
+        await callback.answer("❌ Ошибка удаления", show_alert=True)
+    await show_massage_users(callback)
+
+
+@router.callback_query(F.data.startswith("msg_deduct_"))
+async def ask_deduction_time(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[2])
+    await callback.message.edit_text(
+        "🕒 <b>Укажите время визита:</b>\n\n"
+        "Вы можете списать сеанс прямо сейчас, либо указать дату и время вручную.",
+        reply_markup=get_deduction_time_kb(user_id, "msg")
+    )
+
+
+@router.callback_query(F.data.startswith("msg_time_now_"))
+async def process_deduct_now(callback: CallbackQuery) -> None:
+    user_id = int(callback.data.split("_")[3])
+    await _execute_deduction(callback, user_id, None) 
+
+
+@router.callback_query(F.data.startswith("msg_time_custom_"))
+async def process_deduct_custom_start(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = int(callback.data.split("_")[3])
+    await state.update_data(deduct_user_id=user_id)
+    
+    await callback.message.edit_text(
+        "✏️ Отправьте дату и время визита в формате:\n"
+        "<b>ДД.ММ.ГГГГ ЧЧ:ММ</b>\n\n"
+        "<i>Пример: 15.08.2023 14:30</i>"
+    )
+    await state.set_state(CustomTimeForm.waiting_for_time)
+
+
+@router.message(CustomTimeForm.waiting_for_time, F.text)
+async def process_deduct_custom_finish(message: Message, state: FSMContext) -> None:
+    user_data = await state.get_data()
+    user_id = user_data.get("deduct_user_id")
+    
+    try:
+        visit_time = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
+    except ValueError:
+        await message.answer("❌ Неверный формат! Попробуйте снова.\nПример: 15.08.2023 14:30")
+        return
+
+    await state.clear()
+    
+    try:
+        res = await deduct_sessions(user_id, PackageType.MASSAGE, 1, visit_time)
+        if res["status"] == "success":
+            status_text = "🏁 Пакет завершён!" if res["completed"] else f"✅ Списано задним числом! Остаток: {res['remaining']}"
+            await message.answer(status_text, reply_markup=_back_to_massage_kb())
+        else:
+            await message.answer(f"❌ {res['message']}", reply_markup=_back_to_massage_kb())
+    except Exception:
+        logger.exception("Ошибка кастомного списания user_id=%s", user_id)
+        await message.answer("❌ Ошибка при списании.", reply_markup=_back_to_massage_kb())
+
+
+async def _execute_deduction(callback: CallbackQuery, user_id: int, visit_time: datetime | None) -> None:
+    try:
+        res = await deduct_sessions(user_id, PackageType.MASSAGE, 1, visit_time)
+        if res["status"] == "success":
+            status = "🏁 Пакет завершён!" if res["completed"] else f"✅ Списано! Остаток: {res['remaining']}"
+            await callback.answer(status, show_alert=True)
+            await show_massage_users(callback)
+        else:
+            await callback.message.edit_text(
+                f"❌ {res['message']}",
+                reply_markup=_back_to_massage_kb(),
+            )
+    except Exception:
+        logger.exception("Ошибка списания user_id=%s", user_id)
+        await callback.message.answer(
+            "❌ Ошибка при списании. Смотри логи.",
+            reply_markup=_back_to_massage_kb(),
+        )
