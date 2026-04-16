@@ -34,7 +34,6 @@ from keyboards.admin_kb import (
 logger = logging.getLogger(__name__)
 router = Router()
 
-# Согласно вашему ТЗ: 1 месяц (12), 3 месяца (37), 6 месяцев (75)
 PACKAGE_OPTIONS = [12, 37, 75]
 
 
@@ -78,9 +77,6 @@ def _back_to_edu_kb() -> InlineKeyboardMarkup:
     ])
 
 
-# ==========================================
-# 1. ГЛАВНОЕ МЕНЮ ОБУЧЕНИЯ
-# ==========================================
 @router.callback_query(F.data == "admin_edu")
 async def edu_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -91,9 +87,6 @@ async def edu_menu(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-# ==========================================
-# 2. ДОБАВЛЕНИЕ УЧЕНИКА
-# ==========================================
 @router.callback_query(F.data == "edu_add_student")
 async def add_student_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -139,7 +132,6 @@ async def add_student_package(
             f"<code>{invite_link}</code>",
             reply_markup=_back_to_edu_kb(),
         )
-        logger.info("Добавлен ученик '%s' id=%s занятий=%s", student_name, client_id, sessions_count)
     except Exception:
         logger.exception("Ошибка при добавлении ученика '%s'", student_name)
         await callback.message.answer(
@@ -150,9 +142,6 @@ async def add_student_package(
         await state.clear()
 
 
-# ==========================================
-# 3. УПРАВЛЕНИЕ УЧЕНИКАМИ (СПИСОК И КАРТОЧКА)
-# ==========================================
 @router.callback_query(F.data == "edu_manage_users")
 async def show_edu_users(callback: CallbackQuery) -> None:
     await callback.answer()
@@ -189,16 +178,17 @@ async def show_user_card(callback: CallbackQuery) -> None:
         await callback.message.edit_text("У ученика нет активного курса.", reply_markup=get_user_manage_kb(user_id, "edu"))
         return
 
-    rem = pkg.remaining_sessions
+    rem = pkg.total_sessions - pkg.used_sessions
     tot = pkg.total_sessions
-    buy_date = pkg.created_at.strftime("%d.%m.%Y %H:%M") if pkg.created_at else "Нет данных"
+    buy_date = pkg.created_at.strftime("%d.%m.%Y %H:%M") if hasattr(pkg, 'created_at') and pkg.created_at else "Нет данных"
 
-    # Формируем детальную историю списаний для админа
+    package_visits = [v for v in user.visits if v.package_id == pkg.id] if user.visits else []
+    
     history_text = ""
-    if not pkg.visits:
+    if not package_visits:
         history_text = "<i>Списаний пока не было.</i>"
     else:
-        for i, v in enumerate(pkg.visits, 1):
+        for i, v in enumerate(package_visits, 1):
             v_date = v.visit_time.strftime("%d.%m.%Y %H:%M") if v.visit_time else "Нет даты"
             history_text += f"{i}. <b>{v_date}</b> (Остаток: {v.balance_after})\n"
 
@@ -214,14 +204,11 @@ async def show_user_card(callback: CallbackQuery) -> None:
     await callback.message.edit_text(text, reply_markup=get_user_manage_kb(user_id, "edu"))
 
 
-# ==========================================
-# 4. УДАЛЕНИЕ УЧЕНИКА (АРХИВАЦИЯ)
-# ==========================================
 @router.callback_query(F.data.startswith("edu_delete_"))
 async def confirm_delete_user(callback: CallbackQuery) -> None:
     user_id = int(callback.data.split("_")[2])
     await callback.message.edit_text(
-        "⚠️ <b>Вы уверены?</b>\nУченик будет перемещен в архив. Он исчезнет из списков, но останется в Excel выгрузке.",
+        "⚠️ <b>Вы уверены?</b>\nУченик будет перемещен в архив.",
         reply_markup=get_confirm_delete_kb(user_id, "edu")
     )
 
@@ -230,24 +217,19 @@ async def confirm_delete_user(callback: CallbackQuery) -> None:
 async def execute_delete_user(callback: CallbackQuery) -> None:
     user_id = int(callback.data.split("_")[3])
     success = await archive_user(user_id)
-    
     if success:
         await callback.answer("✅ Ученик перемещен в архив", show_alert=True)
     else:
         await callback.answer("❌ Ошибка удаления", show_alert=True)
-        
-    await show_edu_users(callback) # Возвращаем к списку
+    await show_edu_users(callback)
 
 
-# ==========================================
-# 5. СПИСАНИЕ ЗАНЯТИЯ (ВЫБОР ВРЕМЕНИ)
-# ==========================================
 @router.callback_query(F.data.startswith("edu_deduct_"))
 async def ask_deduction_time(callback: CallbackQuery) -> None:
     user_id = int(callback.data.split("_")[2])
     await callback.message.edit_text(
         "🕒 <b>Укажите время занятия:</b>\n\n"
-        "Вы можете списать занятие прямо сейчас, либо указать дату и время вручную (например, если забыли списать вчера).",
+        "Вы можете списать занятие прямо сейчас, либо указать дату и время вручную.",
         reply_markup=get_deduction_time_kb(user_id, "edu")
     )
 
@@ -296,14 +278,13 @@ async def process_deduct_custom_finish(message: Message, state: FSMContext) -> N
         await message.answer("❌ Ошибка при списании.", reply_markup=_back_to_edu_kb())
 
 
-# --- Внутренняя функция для обработки результата списания ---
 async def _execute_deduction(callback: CallbackQuery, user_id: int, visit_time: datetime | None) -> None:
     try:
         res = await deduct_sessions(user_id, PackageType.EDUCATION, 1, visit_time)
         if res["status"] == "success":
             status = "🏁 Курс завершён!" if res["completed"] else f"✅ Списано! Остаток: {res['remaining']}"
             await callback.answer(status, show_alert=True)
-            await show_edu_users(callback) # Возвращаем к списку
+            await show_edu_users(callback)
         else:
             await callback.message.edit_text(
                 f"❌ {res['message']}",
