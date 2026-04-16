@@ -15,7 +15,7 @@ from aiogram.types import (
 from aiogram.utils.deep_linking import decode_payload
 
 from config import settings
-from database.models import User, PackageType, PackageStatus # Добавили импорт Enums
+from database.models import User, PackageType, PackageStatus
 from database.requests import link_telegram_id, update_user_language
 from middlewares.i18n import TEXTS
 
@@ -23,12 +23,11 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 # --- Клавиатуры ---
-
 def get_user_main_kb(lang: str = "ru") -> ReplyKeyboardMarkup:
     t = TEXTS.get(lang, TEXTS["ru"])
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=t["balance"])],
+            [KeyboardButton(text=t["balance"]), KeyboardButton(text=t["my_stats"])], # Добавили кнопку статистики
             [KeyboardButton(text=t["change_lang"])],
         ],
         resize_keyboard=True,
@@ -43,9 +42,7 @@ def get_language_kb() -> InlineKeyboardMarkup:
         ]
     )
 
-
 # --- Хендлеры ---
-
 @router.message(CommandStart())
 async def cmd_start_unified(
     message: Message,
@@ -53,15 +50,14 @@ async def cmd_start_unified(
     db_user: User | None,
     texts: dict,
 ) -> None:
-    # 1. ПРОВЕРЯЕМ ДИПЛИНК (Пришел ли человек по ссылке)
     if command.args:
         try:
             db_user_id = int(decode_payload(command.args))
             user = await link_telegram_id(db_user_id, message.from_user.id)
             if user:
-                # Если язык еще не выбран, используем русский по умолчанию для приветствия
                 lang = user.language if user.language else "ru"
                 t = TEXTS.get(lang, TEXTS["ru"])
+                # Подставляем имя, которое админ ввел при создании
                 await message.answer(
                     t["greeting"].format(name=user.full_name),
                     reply_markup=get_language_kb(),
@@ -75,7 +71,6 @@ async def cmd_start_unified(
             await message.answer(texts["invalid_link"])
             return
 
-    # 2. ОБЫЧНЫЙ СТАРТ (Без ссылки)
     if message.from_user.id in settings.SUPERADMIN_IDS:
         await message.answer("⚙️ Режим администратора: /admin", reply_markup=get_user_main_kb("ru"))
         return
@@ -89,7 +84,6 @@ async def cmd_start_unified(
         )
     else:
         await message.answer(texts["access_denied"])
-
 
 @router.callback_query(F.data.startswith("lang_"))
 async def process_language_selection(
@@ -106,7 +100,6 @@ async def process_language_selection(
     await callback.message.delete()
     await callback.answer()
 
-
 @router.message(F.text.in_({t["balance"] for t in TEXTS.values()}))
 async def show_profile(
     message: Message,
@@ -122,15 +115,52 @@ async def show_profile(
     lines = [t["profile_head"], ""]
 
     for p in db_user.packages:
-        # ИСПОЛЬЗУЕМ СТРОГИЕ ENUMS
         name = t["massage"] if p.package_type == PackageType.MASSAGE else t["edu"]
         rem = p.total_sessions - p.used_sessions
         status = t["active"] if p.status == PackageStatus.ACTIVE else t["completed"]
         lines.append(f"{name}\n{t['rem']}: <b>{rem}</b> {t['of']} {p.total_sessions}\n{status}\n")
 
-    # ИСПРАВЛЕН БАГ: Добавили parse_mode="HTML"
     await message.answer("\n".join(lines), parse_mode="HTML")
 
+# НОВЫЙ ХЭНДЛЕР ДЛЯ ИСТОРИИ (СТАТИСТИКИ КЛИЕНТА)
+@router.message(F.text.in_({t["my_stats"] for t in TEXTS.values()}))
+async def show_client_history(
+    message: Message,
+    db_user: User | None,
+    texts: dict,
+) -> None:
+    if not db_user or not db_user.packages:
+        await message.answer(texts["no_services"])
+        return
+
+    lang = db_user.language if db_user.language in TEXTS else "ru"
+    t = TEXTS[lang]
+    
+    # Собираем историю по пакетам
+    has_history = False
+    text_blocks = [t["history_head"]]
+
+    for p in db_user.packages:
+        name = t["massage"] if p.package_type == PackageType.MASSAGE else t["edu"]
+        buy_date = p.created_at.strftime("%d.%m.%Y") if p.created_at else "Нет данных"
+        
+        block = f"📝 <b>{name}</b> (Оплата: {buy_date})\n"
+        
+        if not p.visits:
+            block += "<i>Списаний пока не было.</i>\n\n"
+        else:
+            has_history = True
+            for i, v in enumerate(p.visits, 1):
+                v_date = v.visit_time.strftime("%d.%m.%Y %H:%M") if v.visit_time else "Нет даты"
+                block += f"{i}. <b>{v_date}</b> (Остаток: {v.balance_after})\n"
+            block += "\n"
+        
+        text_blocks.append(block)
+
+    if not has_history:
+        await message.answer(t["no_history"])
+    else:
+        await message.answer("".join(text_blocks), parse_mode="HTML")
 
 @router.message(F.text.in_({t["change_lang"] for t in TEXTS.values()}))
 async def change_lang(
