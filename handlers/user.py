@@ -16,7 +16,7 @@ from aiogram.utils.deep_linking import decode_payload
 
 from config import settings
 from database.models import User, PackageType, PackageStatus
-from database.requests import link_telegram_id, update_user_language
+from database.requests import link_telegram_id, update_user_language, get_user_by_tg_id
 from middlewares.i18n import TEXTS
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ def get_user_main_kb(lang: str = "ru") -> ReplyKeyboardMarkup:
     t = TEXTS.get(lang, TEXTS["ru"])
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=t["balance"]), KeyboardButton(text=t["my_stats"])], # Добавили кнопку статистики
+            [KeyboardButton(text=t["balance"]), KeyboardButton(text=t["my_stats"])],
             [KeyboardButton(text=t["change_lang"])],
         ],
         resize_keyboard=True,
@@ -57,9 +57,17 @@ async def cmd_start_unified(
             if user:
                 lang = user.language if user.language else "ru"
                 t = TEXTS.get(lang, TEXTS["ru"])
-                # Подставляем имя, которое админ ввел при создании
+                
+                full_user = await get_user_by_tg_id(message.from_user.id)
+                greeting_key = "greeting_massage" 
+                
+                if full_user and full_user.packages:
+                    pkg = next((p for p in full_user.packages if p.status == PackageStatus.ACTIVE), full_user.packages[-1])
+                    if pkg.package_type == PackageType.EDUCATION:
+                        greeting_key = "greeting_edu"
+                
                 await message.answer(
-                    t["greeting"].format(name=user.full_name),
+                    t[greeting_key].format(name=user.full_name),
                     reply_markup=get_language_kb(),
                     parse_mode="HTML"
                 )
@@ -122,7 +130,6 @@ async def show_profile(
 
     await message.answer("\n".join(lines), parse_mode="HTML")
 
-# НОВЫЙ ХЭНДЛЕР ДЛЯ ИСТОРИИ (СТАТИСТИКИ КЛИЕНТА)
 @router.message(F.text.in_({t["my_stats"] for t in TEXTS.values()}))
 async def show_client_history(
     message: Message,
@@ -136,21 +143,22 @@ async def show_client_history(
     lang = db_user.language if db_user.language in TEXTS else "ru"
     t = TEXTS[lang]
     
-    # Собираем историю по пакетам
     has_history = False
     text_blocks = [t["history_head"]]
 
     for p in db_user.packages:
         name = t["massage"] if p.package_type == PackageType.MASSAGE else t["edu"]
-        buy_date = p.created_at.strftime("%d.%m.%Y") if p.created_at else "Нет данных"
+        buy_date = p.created_at.strftime("%d.%m.%Y") if hasattr(p, 'created_at') and p.created_at else "Нет данных"
         
         block = f"📝 <b>{name}</b> (Оплата: {buy_date})\n"
         
-        if not p.visits:
+        package_visits = [v for v in db_user.visits if v.package_id == p.id] if db_user.visits else []
+        
+        if not package_visits:
             block += "<i>Списаний пока не было.</i>\n\n"
         else:
             has_history = True
-            for i, v in enumerate(p.visits, 1):
+            for i, v in enumerate(package_visits, 1):
                 v_date = v.visit_time.strftime("%d.%m.%Y %H:%M") if v.visit_time else "Нет даты"
                 block += f"{i}. <b>{v_date}</b> (Остаток: {v.balance_after})\n"
             block += "\n"
