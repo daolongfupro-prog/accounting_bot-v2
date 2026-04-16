@@ -4,9 +4,10 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from sqlalchemy import text  # Добавлен импорт для SQL-команд
 
 from config import settings
-from database.engine import close_db, init_db
+from database.engine import close_db, init_db, get_session  # Добавлен get_session
 from handlers import admin_edu, admin_main, admin_massage, superadmin, user
 from middlewares.auth import AuthMiddleware
 from middlewares.i18n import I18nMiddleware
@@ -20,7 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot) -> None:
-    logger.info("Инициализация базы данных...")
+    logger.warning("УДАЛЕНИЕ СТАРЫХ ТАБЛИЦ (ОДНОРАЗОВАЯ АКЦИЯ)...")
+    try:
+        async with get_session() as session:
+            # Принудительно сносим старые таблицы
+            await session.execute(text("DROP TABLE IF EXISTS visits, packages, users CASCADE;"))
+            await session.commit()
+            logger.info("Старые таблицы успешно удалены!")
+    except Exception as e:
+        logger.error(f"Ошибка при удалении таблиц: {e}")
+
+    logger.info("Инициализация новой структуры базы данных...")
     await init_db()
     logger.info("Бот запущен ✅")
 
