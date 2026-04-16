@@ -34,7 +34,7 @@ from keyboards.admin_kb import (
 logger = logging.getLogger(__name__)
 router = Router()
 
-# Согласно нашему ТЗ: 1 месяц (12), 3 месяца (37), 6 месяцев (75)
+# Согласно вашему ТЗ: 1 месяц (12), 3 месяца (37), 6 месяцев (75)
 PACKAGE_OPTIONS = [12, 37, 75]
 
 
@@ -126,12 +126,12 @@ async def add_student_package(
     student_name = user_data.get("student_name")
 
     try:
-        student_id = await create_client_with_package(
+        client_id = await create_client_with_package(
             full_name=student_name,
             package_type=PackageType.EDUCATION,
             total_sessions=sessions_count,
         )
-        invite_link = await create_start_link(bot, str(student_id), encode=True)
+        invite_link = await create_start_link(bot, str(client_id), encode=True)
         await callback.message.edit_text(
             f"✅ Ученик <b>{student_name}</b> успешно добавлен!\n"
             f"Оплачено занятий: {sessions_count}\n\n"
@@ -139,7 +139,7 @@ async def add_student_package(
             f"<code>{invite_link}</code>",
             reply_markup=_back_to_edu_kb(),
         )
-        logger.info("Добавлен ученик '%s' id=%s занятий=%s", student_name, student_id, sessions_count)
+        logger.info("Добавлен ученик '%s' id=%s занятий=%s", student_name, client_id, sessions_count)
     except Exception:
         logger.exception("Ошибка при добавлении ученика '%s'", student_name)
         await callback.message.answer(
@@ -184,13 +184,31 @@ async def show_user_card(callback: CallbackQuery) -> None:
         return
 
     pkg = next((p for p in user.packages if p.status == PackageStatus.ACTIVE), None)
-    rem = pkg.remaining_sessions if pkg else 0
-    tot = pkg.total_sessions if pkg else 0
+    
+    if not pkg:
+        await callback.message.edit_text("У ученика нет активного курса.", reply_markup=get_user_manage_kb(user_id, "edu"))
+        return
+
+    rem = pkg.remaining_sessions
+    tot = pkg.total_sessions
+    buy_date = pkg.created_at.strftime("%d.%m.%Y %H:%M") if pkg.created_at else "Нет данных"
+
+    # Формируем детальную историю списаний для админа
+    history_text = ""
+    if not pkg.visits:
+        history_text = "<i>Списаний пока не было.</i>"
+    else:
+        for i, v in enumerate(pkg.visits, 1):
+            v_date = v.visit_time.strftime("%d.%m.%Y %H:%M") if v.visit_time else "Нет даты"
+            history_text += f"{i}. <b>{v_date}</b> (Остаток: {v.balance_after})\n"
 
     text = (
         f"🎓 <b>Карточка ученика:</b> {user.full_name}\n"
         f"Услуга: Обучение\n"
-        f"Остаток занятий: <b>{rem} из {tot}</b>"
+        f"Дата оплаты курса: <b>{buy_date}</b>\n"
+        f"Остаток занятий: <b>{rem} из {tot}</b>\n\n"
+        f"📈 <b>История посещений:</b>\n"
+        f"{history_text}"
     )
 
     await callback.message.edit_text(text, reply_markup=get_user_manage_kb(user_id, "edu"))
