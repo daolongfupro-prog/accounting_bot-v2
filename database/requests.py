@@ -43,12 +43,21 @@ async def create_client_with_package(
 
 async def link_telegram_id(db_user_id: int, telegram_id: int) -> Optional[User]:
     async with get_session() as session:
+        # 1. СНАЧАЛА ОТВЯЗЫВАЕМ ЭТОТ TELEGRAM ID ОТ ЛЮБЫХ СТАРЫХ (АРХИВНЫХ) ПРОФИЛЕЙ
+        await session.execute(
+            update(User)
+            .where(User.telegram_id == telegram_id)
+            .values(telegram_id=None)
+        )
+        
+        # 2. ТЕПЕРЬ ПРИВЯЗЫВАЕМ К НОВОЙ КАРТОЧКЕ
         user = await session.get(User, db_user_id)
         if not user or user.is_archived:
             logger.warning("Пользователь id=%s не найден или удален", db_user_id)
             return None
             
         user.telegram_id = telegram_id
+        await session.commit() # Надежно сохраняем
         logger.info("Привязан telegram_id=%s к user_id=%s", telegram_id, db_user_id)
         return user
 
@@ -104,6 +113,8 @@ async def archive_user(user_id: int) -> bool:
             return False
             
         user.is_archived = True
+        user.telegram_id = None # Сразу освобождаем TG аккаунт при удалении
+        await session.commit()
         logger.info("Пользователь id=%s переведен в архив", user_id)
         return True
 
@@ -147,6 +158,7 @@ async def deduct_sessions(
             visit.visit_time = visit_time
 
         session.add(visit)
+        await session.commit()
 
         logger.info("user_id=%s списано %s сессий, остаток=%s", user_id, amount, balance_after)
 
